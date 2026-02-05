@@ -7,18 +7,14 @@ import os
 import pandas as pd
 from streamlit_cropper import st_cropper
 
-# --- Page Config for Mobile ---
-st.set_page_config(
-    page_title="Serial Capture", 
-    layout="wide",  # "wide" helps elements use the full mobile screen width
-    initial_sidebar_state="collapsed" # Hide sidebar by default on mobile to save space
-)
+# --- Page Config ---
+st.set_page_config(page_title="Serial Capture", layout="wide")
 
 # 1. Tesseract Path Handling
 if os.name == 'nt': 
     pytesseract.pytesseract.tesseract_cmd = r"C:\Users\abhay_kssmart\AppData\Local\Programs\Tesseract-OCR\tesseract.exe"
 
-# 2. Secure Credentials & Data Loading
+# 2. Data Loading
 SCOPE = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
 
 @st.cache_data(ttl=600)
@@ -28,13 +24,12 @@ def load_master_data():
         creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, SCOPE)
         client = gspread.authorize(creds)
         ss = client.open("School_Master_Serial_Number_Capture")
-        master_sheet = ss.worksheet("school_master")
-        df = pd.DataFrame(master_sheet.get_all_records())
+        df = pd.DataFrame(ss.worksheet("school_master").get_all_records())
         df.columns = [str(c).strip() for c in df.columns]
         df['UDISE'] = df['UDISE'].astype(str)
         return df, ss.worksheet("smartboard_serials")
     except Exception as e:
-        st.error(f"Error loading data: {e}")
+        st.error(f"Error: {e}")
         return None, None
 
 df_master, sheet_serials = load_master_data()
@@ -43,89 +38,94 @@ df_master, sheet_serials = load_master_data()
 st.title("📟 Serial Capture")
 
 if df_master is not None:
-    # --- Step 1: Search & Filter ---
-    with st.expander("🔍 Filter by Location (Optional)", expanded=False):
-        # On mobile, these will stack automatically
+    # --- STEP 1: FILTERS & SEARCH (Non-Mandatory) ---
+    st.markdown("### 1. Select School")
+    
+    # Use columns for desktop; they stack on mobile automatically
+    f_col1, f_col2 = st.columns(2)
+    with f_col1:
         districts = sorted(df_master['District'].unique())
-        sel_dist = st.selectbox("District", ["All"] + districts)
-        
-        if sel_dist != "All":
+        sel_dist = st.selectbox("District Filter", ["All Districts"] + districts)
+    with f_col2:
+        if sel_dist != "All Districts":
             blocks = sorted(df_master[df_master['District'] == sel_dist]['Block'].unique())
-            sel_block = st.selectbox("Block", ["All"] + blocks)
+            sel_block = st.selectbox("Block Filter", ["All Blocks"] + blocks)
         else:
-            sel_block = st.selectbox("Block", ["All"], disabled=True)
+            sel_block = st.selectbox("Block Filter", ["All Blocks"], disabled=True)
 
-    # Filtered logic
+    # Filtering Logic (Invisible to user)
     filtered_df = df_master.copy()
-    if sel_dist != "All": filtered_df = filtered_df[filtered_df['District'] == sel_dist]
-    if sel_block != "All": filtered_df = filtered_df[filtered_df['Block'] == sel_block]
+    if sel_dist != "All Districts":
+        filtered_df = filtered_df[filtered_df['District'] == sel_dist]
+    if sel_block != "All Blocks":
+        filtered_df = filtered_df[filtered_df['Block'] == sel_block]
 
+    # The Primary Search Box
     filtered_df['search_display'] = filtered_df['UDISE'] + " - " + filtered_df['School']
     search_options = sorted(filtered_df['search_display'].unique())
-    
-    st.markdown("### 1. Select School")
-    selected_option = st.selectbox("Type UDISE or School Name", [""] + search_options)
+    selected_option = st.selectbox("Search School Name or UDISE", [""] + search_options)
 
+    # --- STEP 2: DEVICE & CAPTURE ---
     if selected_option:
         selected_udise = selected_option.split(" - ")[0]
-        selected_school_row = df_master[df_master['UDISE'] == selected_udise].iloc[0]
+        school_row = df_master[df_master['UDISE'] == selected_udise].iloc[0]
         
-        # --- Step 2: Device Selection ---
-        st.info(f"📍 {selected_school_row['School']}")
-        udise_code = selected_school_row['UDISE']
-        devices = df_master[df_master['UDISE'] == udise_code]['Device Name'].tolist()
+        st.success(f"📍 {school_row['School']}")
+        
+        # Select Device
+        devices = df_master[df_master['UDISE'] == selected_udise]['Device Name'].tolist()
         selected_device = st.selectbox("Select Device", devices)
 
         st.divider()
 
-        # --- Step 3: Image Upload & Crop ---
+        # Image Upload & Crop
         st.markdown("### 2. Capture Serial")
-        # 'use_camera' parameter helps mobile browsers trigger the camera directly
-        up_file = st.file_uploader("Take Photo or Upload", type=['png', 'jpg', 'jpeg'])
+        up_file = st.file_uploader("Upload/Take Photo", type=['png', 'jpg', 'jpeg'])
         
         if up_file:
             img = Image.open(up_file)
             
-            st.caption("✂️ Crop the Serial Number for accuracy:")
-            # Set a smaller stroke width for mobile visibility
-            cropped_img = st_cropper(
-                img, 
-                realtime_update=True, 
-                box_color='#FF0000', 
-                aspect_ratio=None,
-                should_resize_landscape=True # Helps with landscape mobile photos
-            )
+            # The Cropper tool
+            cropped_img = st_cropper(img, realtime_update=True, box_color='#FF0000', aspect_ratio=None)
             
-            # Preview and Scan
-            st.markdown("#### Crop Preview")
-            final_crop = cropped_img.convert('L')
-            st.image(final_crop, use_container_width=True) # Mobile responsive image
+            st.caption("Preview of Crop:")
+            final_crop = cropped_img.convert('L') # Gray
+            final_crop = ImageOps.autocontrast(final_crop)
+            st.image(final_crop, use_container_width=True)
 
-            if st.button("🚀 Run OCR Scan", use_container_width=True):
-                with st.spinner("Reading..."):
-                    text = pytesseract.image_to_string(final_crop, config='--psm 7')
-                    st.session_state.serial = text.strip()
+            if st.button("🚀 Scan Serial Number", use_container_width=True):
+                with st.spinner("Processing OCR..."):
+                    extracted_text = pytesseract.image_to_string(final_crop, config='--psm 7')
+                    st.session_state.serial = extracted_text.strip()
 
-        # --- Step 4: Submission ---
+        # --- STEP 3: SUBMIT ---
         st.divider()
-        serial_final = st.text_input("Confirm Serial Number", value=st.session_state.get('serial', ""))
-        email = st.text_input("Your Email Address")
+        serial_final = st.text_input("Verified Serial Number", value=st.session_state.get('serial', ""))
+        email = st.text_input("Your Email")
 
-        # use_container_width=True makes the button full-width on mobile
-        if st.button("✅ Submit Data", use_container_width=True):
-            if not serial_final or not email:
-                st.warning("Please enter Serial and Email.")
-            else:
-                existing_serials = pd.DataFrame(sheet_serials.get_all_records())
-                is_dup = False
-                if not existing_serials.empty:
-                    existing_serials.columns = [str(c).strip() for c in existing_serials.columns]
-                    is_dup = ((existing_serials['UDISE'].astype(str) == udise_code) & 
-                              (existing_serials['Device Name'] == selected_device)).any()
-                
-                if is_dup:
-                    st.error("Already submitted for this device.")
+        sub_col1, sub_col2 = st.columns(2)
+        with sub_col1:
+            if st.button("✅ Submit", use_container_width=True):
+                if not serial_final or not email:
+                    st.warning("Enter Serial and Email.")
                 else:
-                    sheet_serials.append_row([udise_code, selected_school_row['School'], selected_device, serial_final, email])
-                    st.success("Successfully Saved!")
-                    st.balloons()
+                    # Duplicate check
+                    existing = pd.DataFrame(sheet_serials.get_all_records())
+                    is_dup = False
+                    if not existing.empty:
+                        existing.columns = [str(c).strip() for c in existing.columns]
+                        is_dup = ((existing['UDISE'].astype(str) == selected_udise) & 
+                                  (existing['Device Name'] == selected_device)).any()
+                    
+                    if is_dup:
+                        st.error("Submission already exists!")
+                    else:
+                        sheet_serials.append_row([selected_udise, school_row['School'], selected_device, serial_final, email])
+                        st.success("Successfully Saved!")
+                        st.balloons()
+        
+        with sub_col2:
+            if st.button("🔄 Clear Form", use_container_width=True):
+                for key in st.session_state.keys():
+                    del st.session_state[key]
+                st.rerun()
