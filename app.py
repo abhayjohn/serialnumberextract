@@ -6,153 +6,88 @@ from PIL import Image, ImageOps, ImageEnhance
 from pyzbar.pyzbar import decode
 from streamlit_cropper import st_cropper
 
-# --- 1. Page Config & Mobile UI Fixes ---
-st.set_page_config(page_title="Pro Serial Capture", layout="wide")
+st.set_page_config(page_title="Master Serial Scanner", layout="wide")
 
-st.markdown("""
-    <style>
-    .stApp { max-width: 100%; padding: 0px; }
-    /* Responsive Cropper for mobile */
-    .stCropper { width: 100% !important; max-width: 100% !important; }
-    /* Ensure image fits container width */
-    div[data-testid="stImage"] img {
-        width: 100% !important;
-        height: auto !important;
-    }
-    /* Large thumb-friendly buttons */
-    .stButton>button { 
-        width: 100%; 
-        height: 3.8em; 
-        font-weight: bold; 
-        font-size: 18px !important;
-        border-radius: 12px;
-        background-color: #007bff;
-        color: white;
-    }
-    div[data-testid="stFileUploader"] { width: 100% !important; }
-    </style>
-    """, unsafe_allow_html=True)
-
-# --- 2. Robust Data Loading Logic ---
+# --- Optimized Data Loading ---
 @st.cache_resource
 def get_gspread_client():
     try:
-        scopes = [
-            "https://www.googleapis.com/auth/spreadsheets",
-            "https://www.googleapis.com/auth/drive"
-        ]
-        
+        scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
         creds_info = st.secrets["gcp_service_account"]
         credentials = Credentials.from_service_account_info(creds_info, scopes=scopes)
-        
-        # Authorize the client
         client = gspread.authorize(credentials)
-        
-        # CORRECT METHOD for modern gspread (v6.0+):
-        # Set timeout to 120 seconds directly on the client
-        client.set_timeout(120) 
-        
+        client.set_timeout(120)
         return client
     except Exception as e:
-        st.error(f"Authentication Failed: {e}")
+        st.error(f"Auth Error: {e}")
         return None
 
-def load_data():
+@st.cache_data(ttl=3600) 
+def load_master():
     client = get_gspread_client()
     if client:
         try:
             ss = client.open("School_Master_Serial_Number_Capture")
             df = pd.DataFrame(ss.worksheet("school_master").get_all_records())
-            df.columns = [str(c).strip() for c in df.columns]
             df['UDISE'] = df['UDISE'].astype(str)
-            return df, ss.worksheet("smartboard_serials")
+            return df
         except Exception as e:
-            st.error(f"Could not open spreadsheet: {e}")
-    return None, None
+            st.error(f"Quota Error: {e}")
+    return None
 
-df_master, sheet_serials = load_data()
+df_master = load_master()
 
-# --- 3. App UI & Logic ---
-st.title("📟 Pro Serial Capture")
+# --- UI Layout ---
+st.title("📟 Pro Thin-Panel Scanner")
 
 if df_master is not None:
-    # --- Step 1: Identify School ---
-    st.markdown("### 1. Identify School")
-    
-    col1, col2 = st.columns(2)
-    with col1:
-        districts = sorted(df_master['District'].unique())
-        sel_dist = st.selectbox("District", ["All"] + districts)
-    with col2:
-        blocks = sorted(df_master[df_master['District'] == sel_dist]['Block'].unique()) if sel_dist != "All" else ["All"]
-        sel_block = st.selectbox("Block", blocks)
-
+    # Unified Search
     f_df = df_master.copy()
-    if sel_dist != "All": f_df = f_df[f_df['District'] == sel_dist]
-    if sel_block != "All": f_df = f_df[f_df['Block'] == sel_block]
+    f_df['search'] = f_df['UDISE'] + " - " + f_df['School']
+    selected = st.selectbox("1. Find School", [""] + sorted(f_df['search'].unique()))
 
-    f_df['search_display'] = f_df['UDISE'] + " - " + f_df['School']
-    selected_option = st.selectbox("Search School/UDISE", [""] + sorted(f_df['search_display'].unique()))
-
-    if selected_option:
-        udise = selected_option.split(" - ")[0]
+    if selected:
+        udise = selected.split(" - ")[0]
         school = df_master[df_master['UDISE'] == udise].iloc[0]['School']
-        device = st.selectbox("Select Device", df_master[df_master['UDISE'] == udise]['Device Name'].tolist())
+        device = st.selectbox("2. Select Device", df_master[df_master['UDISE'] == udise]['Device Name'].tolist())
 
         st.divider()
-
-        # --- Step 2: Capture ---
-        st.markdown("### 2. Capture Barcode")
-        st.info("📸 Tap 'Browse' -> 'Camera' to open your native full-screen camera.")
         
-        img_file = st.file_uploader("Capture Photo", type=['jpg', 'jpeg', 'png'])
+        # Capture Logic
+        img_file = st.file_uploader("3. Capture Photo (Landscape Recommended)", type=['jpg', 'jpeg', 'png'])
 
         if img_file:
             raw_img = Image.open(img_file)
+            st.warning("✂️ CROP: Focus tightly on the barcode only.")
             
-            # --- Step 3: Crop & Binarize ---
-            st.markdown("### ✂️ Manual Crop")
-            st.caption("Drag the box to isolate ONLY the barcode lines.")
+            # The Cropper
+            cropped = st_cropper(raw_img, realtime_update=True, box_color='#00FF00', aspect_ratio=None)
             
-            # Use cropper to isolate the barcode area
-            cropped_img = st_cropper(
-                raw_img, 
-                realtime_update=True, 
-                box_color='#00FF00', 
-                aspect_ratio=None
-            )
+            # Processing Pipeline
+            proc = ImageOps.grayscale(cropped)
+            proc = ImageEnhance.Contrast(proc).enhance(5.0)
+            # Binary Thresholding for 20-digit accuracy
+            proc = proc.point(lambda x: 0 if x < 150 else 255, '1')
             
-            # Enhancement for 100% Clarity
-            proc = ImageOps.grayscale(cropped_img)
-            proc = ImageEnhance.Contrast(proc).enhance(5.0) 
-            proc = proc.point(lambda x: 0 if x < 128 else 255, '1') 
-            
-            st.image(proc, caption="Optimized Scan View", use_container_width=True)
+            st.image(proc, caption="Optimized Preview", use_container_width=True)
 
-            if st.button("🚀 Run Accuracy Scan", use_container_width=True):
-                with st.spinner("Decoding..."):
-                    barcodes = decode(proc)
-                    if barcodes:
-                        st.session_state.barcode_result = barcodes[0].data.decode('utf-8')
-                        st.success(f"✅ Extracted: {st.session_state.barcode_result}")
-                    else:
-                        st.error("Scan Failed. Crop tighter around the barcode lines.")
+            if st.button("🚀 SCAN NOW"):
+                barcodes = decode(proc)
+                if barcodes:
+                    st.session_state.result = barcodes[0].data.decode('utf-8')
+                    st.success(f"Successfully Decoded: {st.session_state.result}")
+                else:
+                    st.error("No code found. Try a wider crop or better lighting.")
 
-        # --- Step 4: Submission ---
+        # Verification & Submit
         st.divider()
-        final_serial = st.text_input("Verified Serial Number", value=st.session_state.get('barcode_result', ""))
-        email = st.text_input("Installer Email")
+        final_val = st.text_input("4. Verified Serial", value=st.session_state.get('result', ""))
+        email = st.text_input("5. Your Email")
 
-        if st.button("✅ Submit Final Data", use_container_width=True):
-            if final_serial and email:
-                try:
-                    with st.spinner("Writing to Google Sheets..."):
-                        sheet_serials.append_row([udise, school, device, final_serial, email])
-                        st.success("Successfully Saved!")
-                        st.balloons()
-                        if 'barcode_result' in st.session_state:
-                            del st.session_state['barcode_result']
-                except Exception as e:
-                    st.error(f"Submission Error: {e}. Please click 'Submit' again.")
-            else:
-                st.warning("Please scan a barcode and enter email.")
+        if st.button("✅ Submit to Google Sheet"):
+            if final_val and email:
+                client = get_gspread_client()
+                ss = client.open("School_Master_Serial_Number_Capture")
+                ss.worksheet("smartboard_serials").append_row([udise, school, device, final_val, email])
+                st.success("Data Saved!")
+                st.balloons()
