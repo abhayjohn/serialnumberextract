@@ -6,14 +6,28 @@ from PIL import Image, ImageOps, ImageEnhance
 from pyzbar.pyzbar import decode
 from streamlit_cropper import st_cropper
 
-# --- 1. Page Config ---
-st.set_page_config(page_title="Serial Capture", layout="wide")
+# --- 1. Page Config & CSS Fixes ---
+st.set_page_config(page_title="Ultra-Accurate Scanner", layout="wide")
 
-# CSS for better mobile button sizing
+# This CSS forces the cropper and images to be full-screen width on mobile
 st.markdown("""
     <style>
-    .stButton>button { width: 100%; height: 3.5em; font-weight: bold; border-radius: 10px; }
-    div[data-testid="stFileUploader"] { width: 100% !important; }
+    .stApp { max-width: 100%; padding: 0px; }
+    /* Force Cropper to be responsive and visible */
+    .stCropper { width: 100% !important; max-width: 100% !important; }
+    /* Ensure the container width is used */
+    div[data-testid="stImage"] img {
+        width: 100% !important;
+        height: auto !important;
+    }
+    /* Large buttons for mobile */
+    .stButton>button { 
+        width: 100%; 
+        height: 3.8em; 
+        font-weight: bold; 
+        font-size: 18px !important;
+        border-radius: 12px;
+    }
     </style>
     """, unsafe_allow_html=True)
 
@@ -38,10 +52,10 @@ def load_data():
 df_master, sheet_serials = load_data()
 
 # --- 3. App UI ---
-st.title("📟 Full-Screen Serial Capture")
+st.title("📟 Smartboard Serial Capture")
 
 if df_master is not None:
-    # --- Step 1: Search Logic ---
+    # --- Step 1: School Selection ---
     st.markdown("### 1. Identify School")
     
     col1, col2 = st.columns(2)
@@ -66,47 +80,59 @@ if df_master is not None:
 
         st.divider()
 
-        # --- Step 2: Capture (Native Full Screen) ---
+        # --- Step 2: Full-Screen Capture ---
         st.markdown("### 2. Capture Barcode")
-        st.info("📸 Click below and choose 'Take Photo' to open your FULL-SCREEN camera.")
+        st.info("📸 Tap 'Browse' -> 'Camera' to use your phone's native FULL-SCREEN camera.")
         
-        # Using file_uploader triggers the native mobile camera app
-        img_file = st.file_uploader("Tap to open Camera", type=['jpg', 'jpeg', 'png'])
+        # Native camera trigger via file_uploader
+        img_file = st.file_uploader("Capture Photo", type=['jpg', 'jpeg', 'png'])
 
         if img_file:
             raw_img = Image.open(img_file)
             
-            # --- Step 3: WhatsApp Style Crop ---
-            st.markdown("### ✂️ Crop & Scan")
-            # Cropper helps isolate the barcode from the full-sized photo
-            cropped_img = st_cropper(raw_img, realtime_update=True, box_color='#00FF00', aspect_ratio=None)
+            # --- Step 3: FULL-WIDTH CROP ---
+            st.markdown("### ✂️ Manual Crop")
+            st.caption("Drag the box to isolate the barcode. The view below is resized to fit your screen.")
             
-            # Enhancement for scan accuracy
+            # Use cropper with high-res handling
+            # aspect_ratio=None allows for long horizontal barcodes
+            cropped_img = st_cropper(
+                raw_img, 
+                realtime_update=True, 
+                box_color='#00FF00', 
+                aspect_ratio=None,
+                should_resize_landscape=True # Helps mobile browsers handle wide images
+            )
+            
+            # High-Accuracy Enhancement
             proc = ImageOps.grayscale(cropped_img)
-            proc = ImageEnhance.Contrast(proc).enhance(3.0)
+            proc = ImageEnhance.Contrast(proc).enhance(5.0) 
+            # Binarization for absolute clarity
+            proc = proc.point(lambda x: 0 if x < 128 else 255, '1') 
             
-            st.image(proc, caption="Ready for Scan", use_container_width=True)
+            st.write("Optimized Scan Preview:")
+            st.image(proc, use_container_width=True)
 
-            if st.button("🚀 Scan Barcode", use_container_width=True):
+            if st.button("🚀 Run Accuracy Scan", use_container_width=True):
                 with st.spinner("Decoding..."):
                     barcodes = decode(proc)
                     if barcodes:
                         st.session_state.barcode_result = barcodes[0].data.decode('utf-8')
-                        st.success(f"✅ Found: {st.session_state.barcode_result}")
+                        st.success(f"✅ Extracted: {st.session_state.barcode_result}")
                     else:
-                        st.error("No barcode detected. Ensure you cropped ONLY the barcode lines.")
+                        st.error("Scan Failed. Try cropping slightly wider.")
 
-        # --- Step 4: Verification & Submit ---
+        # --- Step 4: Submission ---
         st.divider()
         final_serial = st.text_input("Verified Serial Number", value=st.session_state.get('barcode_result', ""))
         email = st.text_input("Installer Email")
 
         if st.button("✅ Submit Final Data", use_container_width=True):
-            if not (final_serial and email):
-                st.warning("Please complete all fields.")
-            else:
+            if final_serial and email:
                 sheet_serials.append_row([udise, school, device, final_serial, email])
                 st.success("Successfully Saved!")
                 st.balloons()
                 if 'barcode_result' in st.session_state:
                     del st.session_state['barcode_result']
+            else:
+                st.warning("Please scan a barcode and enter email.")
