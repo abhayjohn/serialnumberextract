@@ -1,138 +1,106 @@
 import streamlit as st
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
-from PIL import Image
+from PIL import Image, ImageOps
 import pytesseract
 import os
+import pandas as pd
 
-# -----------------------
-# 1. Tesseract OCR Setup
-# -----------------------
-# On Streamlit Cloud, Tesseract is installed via packages.txt and is in the PATH.
-# We only manually set the path if running locally on Windows.
+# 1. Tesseract Path Handling
 if os.name == 'nt': 
     pytesseract.pytesseract.tesseract_cmd = r"C:\Users\abhay_kssmart\AppData\Local\Programs\Tesseract-OCR\tesseract.exe"
 
-# -----------------------
-# 2. Google Sheets Setup
-# -----------------------
-SCOPE = ['https://spreadsheets.google.com/feeds',
-         'https://www.googleapis.com/auth/drive']
+# 2. Secure Credentials & Data Loading
+SCOPE = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
 
-@st.cache_resource
-def get_gspread_client():
-    # Use Streamlit Secrets for security (stored in the dashboard, not GitHub)
-    creds_dict = st.secrets["gcp_service_account"]
-    creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, SCOPE)
-    return gspread.authorize(creds)
+@st.cache_data(ttl=600) # Cache data for 10 minutes
+def load_master_data():
+    try:
+        creds_dict = st.secrets["gcp_service_account"]
+        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, SCOPE)
+        client = gspread.authorize(creds)
+        ss = client.open("School_Master_Serial_Number_Capture")
+        sheet = ss.worksheet("school_master")
+        df = pd.DataFrame(sheet.get_all_records())
+        return df, ss.worksheet("smartboard_serials")
+    except Exception as e:
+        st.error(f"Error loading data: {e}")
+        return None, None
 
-try:
-    client = get_gspread_client()
-    GSHEET_NAME = "School_Master_Serial_Number_Capture"
-    sheet_master = client.open(GSHEET_NAME).worksheet("school_master")
-    sheet_serials = client.open(GSHEET_NAME).worksheet("smartboard_serials")
-except Exception as e:
-    st.error(f"Configuration Error: {e}")
-    st.info("Check if secrets are added in Streamlit Dashboard and the Sheet is shared with the Service Account email.")
-    st.stop()
+df_master, sheet_serials = load_master_data()
 
-# -----------------------
-# 3. App UI & Logic
-# -----------------------
-st.set_page_config(page_title="Serial Capture", page_icon="📝")
-st.title("📟 Smartboard Serial Number Capture")
+# 3. App UI
+st.title("📟 Smartboard Serial Capture")
 
-# Initialize session state for all variables
-for key in ["udise", "school", "devices", "selected_device", "serial_number", "user_email"]:
-    if key not in st.session_state:
-        st.session_state[key] = None
-
-# --- Step 1: Search School ---
-st.subheader("Step 1: Locate School")
-udise_input = st.text_input("Enter UDISE Code", value=st.session_state.udise or "")
-
-if st.button("Search School"):
-    if udise_input:
-        with st.spinner("Fetching school data..."):
-            st.session_state.udise = udise_input.strip()
-            master_data = sheet_master.get_all_records()
-            
-            devices = []
-            school_name = ""
-            for row in master_data:
-                if str(row["UDISE"]) == st.session_state.udise and row["Status"] != "Inactive":
-                    devices.append(row["Device Name"])
-                    school_name = row["School"]
-            
-            if school_name:
-                st.session_state.devices = devices
-                st.session_state.school = school_name
-                st.session_state.selected_device = None
-                st.session_state.serial_number = ""
-                st.success(f"Found: {school_name}")
-            else:
-                st.error("UDISE not found or Inactive.")
-    else:
-        st.warning("Please enter a UDISE code.")
-
-# --- Step 2: Device & OCR ---
-if st.session_state.school:
-    st.divider()
-    st.subheader(f"School: {st.session_state.school}")
+if df_master is not None:
+    # Filter Logic
+    st.sidebar.header("School Selection")
     
-    selected_device = st.selectbox(
-        "Select Device to update",
-        st.session_state.devices
-    )
-    st.session_state.selected_device = selected_device
-
-    # Image Upload & OCR
-    st.write("---")
-    st.markdown("### Step 2: Extract Serial Number")
-    uploaded_file = st.file_uploader("Upload Serial Number Photo", type=["jpg", "jpeg", "png"])
+    # District Filter
+    districts = sorted(df_master['District'].unique())
+    selected_dist = st.sidebar.selectbox("Select District", ["All"] + districts)
     
-    if uploaded_file:
-        img = Image.open(uploaded_file)
-        st.image(img, caption="Uploaded Image", width=300)
+    filtered_df = df_master.copy()
+    if selected_dist != "All":
+        filtered_df = filtered_df[filtered_df['District'] == selected_dist]
+    
+    # Block Filter
+    blocks = sorted(filtered_df['Block'].unique())
+    selected_block = st.sidebar.selectbox("Select Block", ["All"] + blocks)
+    
+    if selected_block != "All":
+        filtered_df = filtered_df[filtered_df['Block'] == selected_block]
         
-        if st.button("Run OCR"):
-            with st.spinner("Reading image..."):
-                try:
-                    text = pytesseract.image_to_string(img)
-                    st.session_state.serial_number = text.strip()
-                except Exception as ocr_err:
-                    st.error("OCR Error. Is Tesseract installed?")
+    # School Search / Select (with Searchable UI)
+    school_list = sorted(filtered_df['School'].unique())
+    selected_school = st.selectbox("Search/Select School Name", [""] + school_list)
 
-    # Manual Correction & Email
-    serial_input = st.text_input("Confirm/Edit Serial Number", value=st.session_state.serial_number or "")
-    email_input = st.text_input("Your Email Address", value=st.session_state.user_email or "")
+    if selected_school:
+        # Auto-fill UDISE based on school
+        school_row = filtered_df[filtered_df['School'] == selected_school].iloc[0]
+        udise_code = str(school_row['UDISE'])
+        st.info(f"**UDISE Code:** {udise_code}")
+        
+        # Get devices for this school
+        devices = filtered_df[filtered_df['School'] == selected_school]['Device Name'].tolist()
+        device = st.selectbox("Select Device", devices)
 
-    # --- Step 3: Submit ---
-    if st.button("Submit to Database"):
-        if not serial_input or not email_input:
-            st.warning("Please provide both the Serial Number and your Email.")
-        else:
-            with st.spinner("Checking for duplicates and saving..."):
-                st.session_state.serial_number = serial_input.strip()
-                st.session_state.user_email = email_input.strip()
+        st.divider()
+        
+        # Step 2: OCR Logic
+        st.subheader("Step 2: Serial Number Capture")
+        up_file = st.file_uploader("Upload Serial Image", type=['png', 'jpg', 'jpeg'])
+        
+        if up_file:
+            img = Image.open(up_file)
+            # Pre-processing for better OCR
+            gray_img = ImageOps.grayscale(img)
+            st.image(gray_img, caption="Processed Image", width=300)
+            
+            if st.button("Extract Serial"):
+                with st.spinner("Processing..."):
+                    text = pytesseract.image_to_string(gray_img, config='--psm 6')
+                    st.session_state.serial = text.strip()
+
+        # Step 3: Manual Confirmation
+        serial_final = st.text_input("Verified Serial Number", 
+                                     value=st.session_state.get('serial', ""))
+        email = st.text_input("Your Email Address")
+
+        if st.button("Submit to Sheet"):
+            if not serial_final or not email:
+                st.warning("Please fill all details.")
+            else:
+                # Duplicate Check
+                existing_serials = pd.DataFrame(sheet_serials.get_all_records())
+                is_dup = False
+                if not existing_serials.empty:
+                    is_dup = ((existing_serials['UDISE'].astype(str) == udise_code) & 
+                              (existing_serials['Device Name'] == device)).any()
                 
-                # Check duplicate (UDISE + Device Name)
-                existing = sheet_serials.get_all_records()
-                duplicate = any(
-                    str(row["UDISE"]) == st.session_state.udise and 
-                    str(row["Device Name"]) == st.session_state.selected_device 
-                    for row in existing
-                )
-                
-                if duplicate:
-                    st.error(f"Error: A serial number has already been submitted for {st.session_state.selected_device} at this school.")
+                if is_dup:
+                    st.error("Submission already exists for this device.")
                 else:
-                    sheet_serials.append_row([
-                        st.session_state.udise,
-                        st.session_state.school,
-                        st.session_state.selected_device,
-                        st.session_state.serial_number,
-                        st.session_state.user_email
-                    ])
-                    st.success("✅ Submission Successful!")
+                    sheet_serials.append_row([udise_code, selected_school, device, serial_final, email])
+                    st.success("Data Saved Successfully!")
                     st.balloons()
