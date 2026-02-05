@@ -96,12 +96,12 @@ if df_master is not None:
             
             # Use cropper with high-res handling
             # aspect_ratio=None allows for long horizontal barcodes
+            # The Cropper tool automatically handles resizing for the display
             cropped_img = st_cropper(
-                raw_img, 
-                realtime_update=True, 
-                box_color='#00FF00', 
-                aspect_ratio=None,
-                should_resize_landscape=True # Helps mobile browsers handle wide images
+            raw_img, 
+            realtime_update=True, 
+            box_color='#00FF00', 
+            aspect_ratio=None
             )
             
             # High-Accuracy Enhancement
