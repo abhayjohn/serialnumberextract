@@ -1,7 +1,8 @@
 streamlit
 gspread
-oauth2client
+google-auth
 pandas
 Pillow
 pyzbar
 streamlit-cropper
+pytesseract
