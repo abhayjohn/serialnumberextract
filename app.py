@@ -25,8 +25,9 @@ def load_master_data():
         master_sheet = ss.worksheet("school_master")
         df = pd.DataFrame(master_sheet.get_all_records())
         
-        # Standardize Headers: Remove spaces, convert to title case
+        # Standardize Headers & ensure UDISE is string for searching
         df.columns = [str(c).strip() for c in df.columns]
+        df['UDISE'] = df['UDISE'].astype(str)
         
         return df, ss.worksheet("smartboard_serials")
     except Exception as e:
@@ -40,49 +41,50 @@ st.set_page_config(page_title="Serial Capture", layout="centered")
 st.title("📟 Smartboard Serial Capture")
 
 if df_master is not None:
-    # SEARCH MODE TOGGLE
-    search_mode = st.radio("Search Method", ["Browse by Location", "Search by UDISE"], horizontal=True)
+    st.markdown("### Step 1: Find School")
     
-    selected_school_row = None
+    # Optional Filters in columns
+    col1, col2 = st.columns(2)
+    with col1:
+        districts = sorted(df_master['District'].unique())
+        sel_dist = st.selectbox("Filter by District", ["All"] + districts)
+    with col2:
+        if sel_dist != "All":
+            blocks = sorted(df_master[df_master['District'] == sel_dist]['Block'].unique())
+            sel_block = st.selectbox("Filter by Block", ["All"] + blocks)
+        else:
+            sel_block = st.selectbox("Filter by Block", ["All"], disabled=True)
 
-    if search_mode == "Browse by Location":
-        col1, col2 = st.columns(2)
-        with col1:
-            districts = sorted(df_master['District'].unique())
-            selected_dist = st.selectbox("District", ["Select"] + districts)
+    # Apply Filters to the dataframe
+    filtered_df = df_master.copy()
+    if sel_dist != "All":
+        filtered_df = filtered_df[filtered_df['District'] == sel_dist]
+    if sel_block != "All":
+        filtered_df = filtered_df[filtered_df['Block'] == sel_block]
+
+    # UNIFIED SEARCH: Display "UDISE - School Name"
+    # This allows users to type either the UDISE or the Name into the same box
+    filtered_df['search_display'] = filtered_df['UDISE'] + " - " + filtered_df['School']
+    
+    search_options = sorted(filtered_df['search_display'].unique())
+    selected_option = st.selectbox("Type UDISE or School Name", [""] + search_options)
+
+    if selected_option:
+        # Extract the UDISE from the selection (it's the first part before the " - ")
+        selected_udise = selected_option.split(" - ")[0]
+        selected_school_row = df_master[df_master['UDISE'] == selected_udise].iloc[0]
         
-        with col2:
-            if selected_dist != "Select":
-                blocks = sorted(df_master[df_master['District'] == selected_dist]['Block'].unique())
-                selected_block = st.selectbox("Block", ["Select"] + blocks)
-            else:
-                st.selectbox("Block", ["Select"], disabled=True)
-
-        if selected_dist != "Select" and selected_block != "Select":
-            school_list = sorted(df_master[(df_master['District'] == selected_dist) & 
-                                         (df_master['Block'] == selected_block)]['School'].unique())
-            school_name = st.selectbox("Select School", [""] + school_list)
-            if school_name:
-                selected_school_row = df_master[df_master['School'] == school_name].iloc[0]
-
-    else: # Search by UDISE
-        udise_input = st.text_input("Enter 11-Digit UDISE Code")
-        if udise_input:
-            match = df_master[df_master['UDISE'].astype(str) == udise_input.strip()]
-            if not match.empty:
-                selected_school_row = match.iloc[0]
-                st.success(f"✅ School Found: {selected_school_row['School']}")
-            else:
-                st.error("❌ UDISE not found.")
-
-    # 4. Device and OCR Section
-    if selected_school_row is not None:
+        st.success(f"Selected: {selected_school_row['School']} ({selected_udise})")
         st.divider()
-        udise_code = str(selected_school_row['UDISE'])
+
+        # 4. Device and OCR Section
+        udise_code = selected_school_row['UDISE']
         school_name = selected_school_row['School']
         
-        # Get devices for this specific UDISE
-        devices = df_master[df_master['UDISE'].astype(str) == udise_code]['Device Name'].tolist()
+        # Get devices for this school
+        # (Handling cases where 'Device Name' column might have slight variations)
+        dev_col = next((c for c in df_master.columns if "device" in c.lower()), "Device Name")
+        devices = df_master[df_master['UDISE'] == udise_code][dev_col].tolist()
         selected_device = st.selectbox("Select Device", devices)
 
         st.subheader("Step 2: Serial Capture")
@@ -90,17 +92,14 @@ if df_master is not None:
         
         if up_file:
             img = Image.open(up_file)
-            # Basic Image Processing for OCR
             gray = ImageOps.grayscale(img)
-            # Increase contrast
             gray = ImageOps.autocontrast(gray)
-            st.image(gray, caption="Ready for OCR", width=300)
+            st.image(gray, caption="OCR Preview", width=300)
             
-            if st.button("Extract Text"):
-                # psm 6: Assume a single uniform block of text
-                # psm 7: Treat the image as a single text line
-                text = pytesseract.image_to_string(gray, config='--psm 6')
-                st.session_state.serial = text.strip()
+            if st.button("Extract Text from Image"):
+                with st.spinner("Reading Serial..."):
+                    text = pytesseract.image_to_string(gray, config='--psm 6')
+                    st.session_state.serial = text.strip()
 
         # Final Verification
         serial_final = st.text_input("Verified Serial Number", value=st.session_state.get('serial', ""))
@@ -110,10 +109,12 @@ if df_master is not None:
             if not serial_final or not email:
                 st.warning("Please complete all fields.")
             else:
-                # Duplicate Check logic
+                # Duplicate Check
                 existing_serials = pd.DataFrame(sheet_serials.get_all_records())
                 is_dup = False
                 if not existing_serials.empty:
+                    # Clean headers of existing_serials too
+                    existing_serials.columns = [str(c).strip() for c in existing_serials.columns]
                     is_dup = ((existing_serials['UDISE'].astype(str) == udise_code) & 
                               (existing_serials['Device Name'] == selected_device)).any()
                 
