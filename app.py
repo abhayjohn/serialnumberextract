@@ -5,6 +5,7 @@ from PIL import Image, ImageOps
 import pytesseract
 import os
 import pandas as pd
+from streamlit_cropper import st_cropper # New Import
 
 # 1. Tesseract Path Handling
 if os.name == 'nt': 
@@ -20,15 +21,10 @@ def load_master_data():
         creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, SCOPE)
         client = gspread.authorize(creds)
         ss = client.open("School_Master_Serial_Number_Capture")
-        
-        # Load School Master
         master_sheet = ss.worksheet("school_master")
         df = pd.DataFrame(master_sheet.get_all_records())
-        
-        # Standardize Headers & ensure UDISE is string for searching
         df.columns = [str(c).strip() for c in df.columns]
         df['UDISE'] = df['UDISE'].astype(str)
-        
         return df, ss.worksheet("smartboard_serials")
     except Exception as e:
         st.error(f"Error loading data: {e}")
@@ -41,9 +37,7 @@ st.set_page_config(page_title="Serial Capture", layout="centered")
 st.title("📟 Smartboard Serial Capture")
 
 if df_master is not None:
-    st.markdown("### Step 1: Find School")
-    
-    # Optional Filters in columns
+    # --- Step 1: Search ---
     col1, col2 = st.columns(2)
     with col1:
         districts = sorted(df_master['District'].unique())
@@ -55,53 +49,51 @@ if df_master is not None:
         else:
             sel_block = st.selectbox("Filter by Block", ["All"], disabled=True)
 
-    # Apply Filters to the dataframe
     filtered_df = df_master.copy()
-    if sel_dist != "All":
-        filtered_df = filtered_df[filtered_df['District'] == sel_dist]
-    if sel_block != "All":
-        filtered_df = filtered_df[filtered_df['Block'] == sel_block]
+    if sel_dist != "All": filtered_df = filtered_df[filtered_df['District'] == sel_dist]
+    if sel_block != "All": filtered_df = filtered_df[filtered_df['Block'] == sel_block]
 
-    # UNIFIED SEARCH: Display "UDISE - School Name"
-    # This allows users to type either the UDISE or the Name into the same box
     filtered_df['search_display'] = filtered_df['UDISE'] + " - " + filtered_df['School']
-    
     search_options = sorted(filtered_df['search_display'].unique())
     selected_option = st.selectbox("Type UDISE or School Name", [""] + search_options)
 
     if selected_option:
-        # Extract the UDISE from the selection (it's the first part before the " - ")
         selected_udise = selected_option.split(" - ")[0]
         selected_school_row = df_master[df_master['UDISE'] == selected_udise].iloc[0]
         
-        st.success(f"Selected: {selected_school_row['School']} ({selected_udise})")
         st.divider()
 
-        # 4. Device and OCR Section
+        # --- Step 2: Device Selection ---
         udise_code = selected_school_row['UDISE']
         school_name = selected_school_row['School']
-        
-        # Get devices for this school
-        # (Handling cases where 'Device Name' column might have slight variations)
-        dev_col = next((c for c in df_master.columns if "device" in c.lower()), "Device Name")
-        devices = df_master[df_master['UDISE'] == udise_code][dev_col].tolist()
+        devices = df_master[df_master['UDISE'] == udise_code]['Device Name'].tolist()
         selected_device = st.selectbox("Select Device", devices)
 
-        st.subheader("Step 2: Serial Capture")
+        # --- Step 3: Image Upload & Crop ---
+        st.subheader("Step 2: Serial Capture & Crop")
         up_file = st.file_uploader("Upload Serial Photo", type=['png', 'jpg', 'jpeg'])
         
         if up_file:
             img = Image.open(up_file)
-            gray = ImageOps.grayscale(img)
-            gray = ImageOps.autocontrast(gray)
-            st.image(gray, caption="OCR Preview", width=300)
             
-            if st.button("Extract Text from Image"):
-                with st.spinner("Reading Serial..."):
-                    text = pytesseract.image_to_string(gray, config='--psm 6')
+            st.info("💡 Draw a box around the Serial Number only for better accuracy.")
+            
+            # The Cropper Tool
+            # box_color and aspect_ratio=None allows free-form cropping
+            cropped_img = st_cropper(img, realtime_update=True, box_color='#00FF00', aspect_ratio=None)
+            
+            # Preview the cropped area
+            st.write("Preview of Area to Scan:")
+            final_crop = cropped_img.convert('L') # Convert to Grayscale for OCR
+            st.image(final_crop, width=200)
+
+            if st.button("Extract Serial from Cropped Area"):
+                with st.spinner("Scanning..."):
+                    # psm 7 is often better for a single line of text (like a serial number)
+                    text = pytesseract.image_to_string(final_crop, config='--psm 7')
                     st.session_state.serial = text.strip()
 
-        # Final Verification
+        # --- Step 4: Submission ---
         serial_final = st.text_input("Verified Serial Number", value=st.session_state.get('serial', ""))
         email = st.text_input("Your Email")
 
@@ -109,11 +101,9 @@ if df_master is not None:
             if not serial_final or not email:
                 st.warning("Please complete all fields.")
             else:
-                # Duplicate Check
                 existing_serials = pd.DataFrame(sheet_serials.get_all_records())
                 is_dup = False
                 if not existing_serials.empty:
-                    # Clean headers of existing_serials too
                     existing_serials.columns = [str(c).strip() for c in existing_serials.columns]
                     is_dup = ((existing_serials['UDISE'].astype(str) == udise_code) & 
                               (existing_serials['Device Name'] == selected_device)).any()
