@@ -6,24 +6,14 @@ from PIL import Image, ImageOps, ImageEnhance
 from pyzbar.pyzbar import decode
 from streamlit_cropper import st_cropper
 
-# --- 1. Page Config & Mobile CSS ---
+# --- 1. Page Config ---
 st.set_page_config(page_title="Serial Capture", layout="wide")
 
+# CSS for better mobile button sizing
 st.markdown("""
     <style>
-    /* Force camera and video to be full width on mobile */
-    div[data-testid="stCameraInput"] { width: 100% !important; }
-    div[data-testid="stCameraInput"] video { 
-        width: 100% !important; 
-        height: auto !important; 
-        border-radius: 12px;
-    }
-    /* Large thumb-friendly buttons */
-    .stButton>button { 
-        width: 100%; 
-        height: 3.5em; 
-        font-weight: bold; 
-    }
+    .stButton>button { width: 100%; height: 3.5em; font-weight: bold; border-radius: 10px; }
+    div[data-testid="stFileUploader"] { width: 100% !important; }
     </style>
     """, unsafe_allow_html=True)
 
@@ -48,7 +38,7 @@ def load_data():
 df_master, sheet_serials = load_data()
 
 # --- 3. App UI ---
-st.title("📟 Smartboard Serial Capture")
+st.title("📟 Full-Screen Serial Capture")
 
 if df_master is not None:
     # --- Step 1: Search Logic ---
@@ -59,9 +49,7 @@ if df_master is not None:
         dists = sorted(df_master['District'].unique())
         sel_dist = st.selectbox("District", ["All"] + dists)
     with col2:
-        blocks = ["All"]
-        if sel_dist != "All":
-            blocks = sorted(df_master[df_master['District'] == sel_dist]['Block'].unique())
+        blocks = sorted(df_master[df_master['District'] == sel_dist]['Block'].unique()) if sel_dist != "All" else ["All"]
         sel_block = st.selectbox("Block", blocks)
 
     f_df = df_master.copy()
@@ -78,52 +66,47 @@ if df_master is not None:
 
         st.divider()
 
-        # --- Step 2: Capture, Crop & Scan ---
+        # --- Step 2: Capture (Native Full Screen) ---
         st.markdown("### 2. Capture Barcode")
+        st.info("📸 Click below and choose 'Take Photo' to open your FULL-SCREEN camera.")
         
-        # Taking the full-size photo
-        img_file = st.camera_input("Take a photo of the label")
+        # Using file_uploader triggers the native mobile camera app
+        img_file = st.file_uploader("Tap to open Camera", type=['jpg', 'jpeg', 'png'])
 
         if img_file:
             raw_img = Image.open(img_file)
             
-            # Show cropping interface ONLY after photo is captured
-            st.info("✂️ WhatsApp Mode: Drag the box to cover ONLY the barcode lines.")
-            
-            # The Cropper Tool (Isolates the barcode area)
+            # --- Step 3: WhatsApp Style Crop ---
+            st.markdown("### ✂️ Crop & Scan")
+            # Cropper helps isolate the barcode from the full-sized photo
             cropped_img = st_cropper(raw_img, realtime_update=True, box_color='#00FF00', aspect_ratio=None)
             
-            # Image Enhancement for better scan accuracy
+            # Enhancement for scan accuracy
             proc = ImageOps.grayscale(cropped_img)
-            proc = ImageEnhance.Contrast(proc).enhance(3.0) # High contrast for barcodes
+            proc = ImageEnhance.Contrast(proc).enhance(3.0)
             
-            st.write("Scan Preview:")
-            st.image(proc, use_container_width=True)
+            st.image(proc, caption="Ready for Scan", use_container_width=True)
 
-            # Sequential Action Buttons
-            c1, c2 = st.columns(2)
-            with c1:
-                if st.button("🚀 Scan Barcode", use_container_width=True):
-                    with st.spinner("Decoding..."):
-                        barcodes = decode(proc)
-                        if barcodes:
-                            st.session_state.barcode_result = barcodes[0].data.decode('utf-8')
-                            st.success(f"✅ Found: {st.session_state.barcode_result}")
-                        else:
-                            st.error("No barcode detected in crop. Try adjusting the box or retaking the photo.")
-            with c2:
-                if st.button("🔄 Retake Photo", use_container_width=True):
-                    st.rerun()
+            if st.button("🚀 Scan Barcode", use_container_width=True):
+                with st.spinner("Decoding..."):
+                    barcodes = decode(proc)
+                    if barcodes:
+                        st.session_state.barcode_result = barcodes[0].data.decode('utf-8')
+                        st.success(f"✅ Found: {st.session_state.barcode_result}")
+                    else:
+                        st.error("No barcode detected. Ensure you cropped ONLY the barcode lines.")
 
-        # --- Step 3: Submission ---
+        # --- Step 4: Verification & Submit ---
         st.divider()
         final_serial = st.text_input("Verified Serial Number", value=st.session_state.get('barcode_result', ""))
         email = st.text_input("Installer Email")
 
         if st.button("✅ Submit Final Data", use_container_width=True):
-            if not final_serial or not email:
-                st.warning("Please scan a barcode and enter email.")
+            if not (final_serial and email):
+                st.warning("Please complete all fields.")
             else:
                 sheet_serials.append_row([udise, school, device, final_serial, email])
                 st.success("Successfully Saved!")
                 st.balloons()
+                if 'barcode_result' in st.session_state:
+                    del st.session_state['barcode_result']
