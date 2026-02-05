@@ -12,9 +12,9 @@ st.set_page_config(page_title="Pro Serial Capture", layout="wide")
 st.markdown("""
     <style>
     .stApp { max-width: 100%; padding: 0px; }
-    /* Force Cropper to be responsive and visible on mobile */
+    /* Responsive Cropper for mobile */
     .stCropper { width: 100% !important; max-width: 100% !important; }
-    /* Ensure the container width is used for images */
+    /* Ensure image fits container width */
     div[data-testid="stImage"] img {
         width: 100% !important;
         height: auto !important;
@@ -34,22 +34,24 @@ st.markdown("""
     """, unsafe_allow_html=True)
 
 # --- 2. Robust Data Loading Logic ---
-@st.cache_resource # Cache the connection client to improve performance
+@st.cache_resource
 def get_gspread_client():
     try:
-        # Define necessary scopes for Sheets and Drive
         scopes = [
             "https://www.googleapis.com/auth/spreadsheets",
             "https://www.googleapis.com/auth/drive"
         ]
         
-        # Load from Streamlit Secrets (Modern Auth)
         creds_info = st.secrets["gcp_service_account"]
         credentials = Credentials.from_service_account_info(creds_info, scopes=scopes)
         
-        # Authorize and set a custom timeout to prevent the 'auth_request' error
+        # Authorize the client
         client = gspread.authorize(credentials)
-        client.session.timeout = 120 # Increase timeout to 120 seconds
+        
+        # CORRECT METHOD for modern gspread (v6.0+):
+        # Set timeout to 120 seconds directly on the client
+        client.set_timeout(120) 
+        
         return client
     except Exception as e:
         st.error(f"Authentication Failed: {e}")
@@ -60,13 +62,9 @@ def load_data():
     if client:
         try:
             ss = client.open("School_Master_Serial_Number_Capture")
-            
-            # Load School Master data
             df = pd.DataFrame(ss.worksheet("school_master").get_all_records())
             df.columns = [str(c).strip() for c in df.columns]
             df['UDISE'] = df['UDISE'].astype(str)
-            
-            # Return Master DF and the specific worksheet for writing
             return df, ss.worksheet("smartboard_serials")
         except Exception as e:
             st.error(f"Could not open spreadsheet: {e}")
@@ -103,17 +101,16 @@ if df_master is not None:
 
         st.divider()
 
-        # --- Step 2: High-Resolution Capture ---
+        # --- Step 2: Capture ---
         st.markdown("### 2. Capture Barcode")
-        st.info("📸 Tap 'Browse' -> 'Camera' to use your phone's native FULL-SCREEN camera.")
+        st.info("📸 Tap 'Browse' -> 'Camera' to open your native full-screen camera.")
         
-        # Using file_uploader triggers the native mobile camera app
         img_file = st.file_uploader("Capture Photo", type=['jpg', 'jpeg', 'png'])
 
         if img_file:
             raw_img = Image.open(img_file)
             
-            # --- Step 3: Sequential Crop & Binarize ---
+            # --- Step 3: Crop & Binarize ---
             st.markdown("### ✂️ Manual Crop")
             st.caption("Drag the box to isolate ONLY the barcode lines.")
             
@@ -125,10 +122,8 @@ if df_master is not None:
                 aspect_ratio=None
             )
             
-            # HIGH-ACCURACY ENHANCEMENT PIPELINE
-            # Convert to Grayscale
+            # Enhancement for 100% Clarity
             proc = ImageOps.grayscale(cropped_img)
-            # Thresholding/Binarization: Force pixels to pure black or white for 100% clarity
             proc = ImageEnhance.Contrast(proc).enhance(5.0) 
             proc = proc.point(lambda x: 0 if x < 128 else 255, '1') 
             
@@ -141,7 +136,7 @@ if df_master is not None:
                         st.session_state.barcode_result = barcodes[0].data.decode('utf-8')
                         st.success(f"✅ Extracted: {st.session_state.barcode_result}")
                     else:
-                        st.error("Scan Failed. Try cropping slightly tighter around the barcode bars.")
+                        st.error("Scan Failed. Crop tighter around the barcode lines.")
 
         # --- Step 4: Submission ---
         st.divider()
@@ -152,7 +147,7 @@ if df_master is not None:
             if final_serial and email:
                 try:
                     with st.spinner("Writing to Google Sheets..."):
-                        sheet_serials.append_row([udise, school, device, final_serial, email]) #
+                        sheet_serials.append_row([udise, school, device, final_serial, email])
                         st.success("Successfully Saved!")
                         st.balloons()
                         if 'barcode_result' in st.session_state:
