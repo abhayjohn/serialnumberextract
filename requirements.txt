@@ -1,6 +1,5 @@
 streamlit
 gspread
 oauth2client
-Pillow
 pandas
-streamlit-barcode-scanner
+streamlit-camera-qr-code
